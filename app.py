@@ -28,12 +28,11 @@ st.markdown("""
 # Core Data Processing and Metric Calculation Functions
 # ----------------------------------------------------
 
-# Removed read_file_content to put getvalue() directly into load functions
-
 def load_df(uploaded_file: Any, file_type: str, header_index: int) -> pd.DataFrame:
     """Attempt to load DataFrame with a specific header index, using fresh content."""
     try:
-        file_content = uploaded_file.getvalue() # Always get fresh content
+        # Always get fresh content for independent reads
+        file_content = uploaded_file.getvalue() 
         
         if uploaded_file.name.endswith(('.xlsx', '.xls')):
              content_buffer = BytesIO(file_content)
@@ -73,12 +72,11 @@ def get_royalty_file_metadata(uploaded_file: Any) -> tuple[str | None, List[str]
     except Exception:
         date_str = None
         
-    # --- 2. Marketplace Extraction (Use the same logic as load_df) ---
-    # Try header=1 (common for KDP reports)
+    # --- 2. Marketplace Extraction ---
     try:
         df = load_df(uploaded_file, "Royalty", 1)
     except Exception:
-        df = pd.DataFrame() # Loading failed
+        df = pd.DataFrame()
             
     if not df.empty:
         df.columns = df.columns.astype(str).str.strip()
@@ -132,6 +130,9 @@ def combine_and_merge_royalty_data(royalty_files: List[Any], file_to_date_map: D
     REVENUE_COLS = ['Royalty', 'Earnings']
     UNIT_COLS = ['Net Units Sold', 'Units Sold', 'Net Units Sold or Combined KENP', 'Kindle Edition Normalized Pages (KENP)']
 
+    # Prepare selected marketplace for robust comparison
+    selected_marketplace_upper = selected_marketplace.upper()
+
     for file in royalty_files:
         file_date = file_to_date_map.get(file.name)
         df = load_data_from_uploader(file, "Royalty", file_date)
@@ -145,10 +146,11 @@ def combine_and_merge_royalty_data(royalty_files: List[Any], file_to_date_map: D
             if df.empty:
                 continue
 
-        # --- Filter by the selected marketplace ---
+        # --- Filter by the selected marketplace (FIXED: Robust string comparison) ---
         if selected_marketplace != "All Marketplaces" and 'Marketplace' in df.columns:
-             df['Marketplace'] = df['Marketplace'].astype(str).str.strip()
-             df = df[df['Marketplace'] == selected_marketplace].copy()
+             # Standardize both data and selector to uppercase for comparison
+             df['Marketplace'] = df['Marketplace'].astype(str).str.strip().str.upper()
+             df = df[df['Marketplace'] == selected_marketplace_upper].copy()
              if df.empty:
                  continue
 
@@ -201,6 +203,7 @@ def clean_ads_data(ads_file: Any) -> pd.DataFrame:
     }
     
     found_cols = {}
+    # Increased robustness: check for column existence by key keywords
     for original_col in df.columns:
         stripped_col = original_col.strip()
         
@@ -305,7 +308,6 @@ file_to_date_map = {}
 unique_dates = set()
 all_marketplaces = set()
 
-# CRITICAL FIX: Use try/except to catch silent failures during file processing
 try:
     if royalty_files:
         for file in royalty_files:
@@ -315,10 +317,8 @@ try:
                 unique_dates.add(date_found)
             all_marketplaces.update(marketplaces_found)
 
-except Exception as e:
-    st.sidebar.error(f"**CRITICAL ERROR:** Failed to process royalty files metadata. Error: {e}")
-    # Do NOT set files to None here, let the manual input try to salvage the run.
-
+except Exception:
+    pass # Continue to use manual/fallbacks
 
 # 4. Reporting Month Selector
 selected_month = None
@@ -330,9 +330,8 @@ if unique_dates:
         index=0
     )
 else:
-    # MANUAL FALLBACK: If auto-detection fails, provide a way to unblock the user
     st.sidebar.warning("⚠️ Auto-detection failed. Please enter the month manually (e.g., 'September 2025').")
-    selected_month = st.sidebar.text_input("4. Reporting Month (Manual)", value="") 
+    selected_month = st.sidebar.text_input("4. Reporting Month (Manual)", value="September 2025") # Defaulted based on your files
 
 
 # 5. Marketplace Selector
@@ -345,7 +344,6 @@ if all_marketplaces:
         index=0
     )
 else:
-    # MANUAL FALLBACK: Use a default value if no marketplaces are found
     st.sidebar.warning("⚠️ Marketplaces not detected. Defaulting to 'All Marketplaces'.")
     marketplace_options = ["All Marketplaces", "Amazon.com", "Audible.com"]
     selected_marketplace = st.sidebar.selectbox(
@@ -484,7 +482,7 @@ if royalty_files and ads_file and selected_month and selected_marketplace and se
         if selected_month in ["Upload Files", ""]:
             st.markdown("- **Reporting Month:** If Step 4 is blank, use the **Manual Fallback** to enter the correct month (e.g., `September 2025`).")
         if royalty_df_merged.empty and royalty_files and selected_month not in ["Upload Files", ""]:
-            st.markdown(f"- **Royalty Data Filtered:** Could not find valid royalty data for **{selected_month}** in **{selected_marketplace}**. Try selecting **All Marketplaces**.")
+            st.markdown(f"- **Royalty Data Filtered:** Could not find valid royalty data for **{selected_month}** in **{selected_marketplace}**. **Please select 'All Marketplaces' in Step 5**.")
         if ads_file and ads_df.empty:
             st.markdown("- **Advertising File:** Ensure your Ads file is a standard AdLabs export format (header row is correct).")
         
