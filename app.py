@@ -32,10 +32,8 @@ def read_file_content(uploaded_file):
     """Helper to get file content and handle common formats."""
     file_content = uploaded_file.getvalue()
     if uploaded_file.name.endswith('.csv'):
-        # Decode, ignoring bad characters, and return as text stream
         return StringIO(file_content.decode('utf-8', errors='ignore'))
     elif uploaded_file.name.endswith(('.xlsx', '.xls')):
-        # Return as byte stream for pandas to handle Excel
         return BytesIO(file_content)
     return None
 
@@ -49,34 +47,33 @@ def load_df(uploaded_file: Any, file_type: str, header_index: int) -> pd.DataFra
         else: # For CSV
              df = pd.read_csv(content, header=header_index, encoding='utf-8', on_bad_lines='skip')
         
-        # CRITICAL FIX: Ensure all column headers are strings and cleaned
         df.columns = df.columns.astype(str).str.strip()
         df.dropna(how='all', inplace=True)
         return df
     except Exception:
-        return pd.DataFrame() # Return empty on any loading failure
+        return pd.DataFrame()
 
 
 @st.cache_data(show_spinner=False)
 def get_royalty_file_metadata(uploaded_file: Any) -> tuple[str | None, List[str]]:
     """
-    FIX: A single, cached function to extract all necessary metadata 
-    (Date and Marketplaces) from the uploaded file content.
+    Extracts date and marketplaces. FIX: Targeted date extraction for KDP CSV format.
     """
     file_content = uploaded_file.getvalue()
     date_str = None
     marketplaces = []
     
-    # --- 1. Date Extraction ---
+    # --- 1. Date Extraction (Targeted Fix for KDP CSV header) ---
     try:
         if uploaded_file.name.endswith('.csv'):
+            # Read first line as text
             first_line = StringIO(file_content.decode('utf-8', errors='ignore')).readline()
-            if first_line.lower().startswith('sales period'):
+            if first_line.strip().lower().startswith('sales period'):
+                # Extracts the value after the first comma, e.g., 'September 2025'
                 parts = first_line.split(',')
                 if len(parts) > 1:
                     date_str = parts[1].strip()
         elif uploaded_file.name.endswith(('.xlsx', '.xls')):
-            # Read first row for date (usually column 1, index 0)
             df_temp_header = pd.read_excel(BytesIO(file_content), header=None, nrows=1)
             date_str = str(df_temp_header.iloc[0, 1]).strip()
             
@@ -84,10 +81,7 @@ def get_royalty_file_metadata(uploaded_file: Any) -> tuple[str | None, List[str]
         date_str = None
         
     # --- 2. Marketplace Extraction ---
-    # Load the actual data to find unique marketplaces. Using BytesIO/StringIO 
-    # here ensures we are not relying on the Streamlit file object's state.
-    
-    # Try header=1 (common for KDP reports)
+    # Load the actual data to find unique marketplaces. Try header=1 (common for KDP reports)
     try:
         if uploaded_file.name.endswith(('.xlsx', '.xls')):
             df = pd.read_excel(BytesIO(file_content), header=1)
@@ -101,9 +95,9 @@ def get_royalty_file_metadata(uploaded_file: Any) -> tuple[str | None, List[str]
             else:
                 df = pd.read_csv(StringIO(file_content.decode('utf-8', errors='ignore')), header=0, encoding='utf-8', on_bad_lines='skip')
         except Exception:
-            df = pd.DataFrame() # Loading failed
+            df = pd.DataFrame()
             
-    if not df.empty and 'Marketplace' in df.columns.astype(str):
+    if not df.empty:
         df.columns = df.columns.astype(str).str.strip()
         if 'Marketplace' in df.columns:
             marketplaces = df['Marketplace'].astype(str).str.strip().unique().tolist()
@@ -128,7 +122,7 @@ def load_data_from_uploader(uploaded_file: Any, file_type: str, file_date: str |
         # Attempt 1: Skip first row (header=1)
         df = load_df(uploaded_file, file_type, 1)
         if not df.empty and 'Title' in df.columns.astype(str).str.strip():
-            df.columns = df.columns.astype(str).str.strip() # Re-apply cleaning
+            df.columns = df.columns.astype(str).str.strip()
             if file_date:
                 df['Report Date'] = file_date
             return df
@@ -136,7 +130,7 @@ def load_data_from_uploader(uploaded_file: Any, file_type: str, file_date: str |
         # Attempt 2: Use first row as header (header=0)
         df = load_df(uploaded_file, file_type, 0)
         if not df.empty and 'Title' in df.columns.astype(str).str.strip():
-            df.columns = df.columns.astype(str).str.strip() # Re-apply cleaning
+            df.columns = df.columns.astype(str).str.strip()
             if file_date:
                 df['Report Date'] = file_date
             return df
@@ -189,7 +183,6 @@ def combine_and_merge_royalty_data(royalty_files: List[Any], file_to_date_map: D
         df['Raw Units Sold'] = 0
         for col in UNIT_COLS:
             if col in df.columns:
-                # Use np.floor before converting to int to handle potential float/decimal results from parsing
                 df.loc[:, 'Raw Units Sold'] = pd.to_numeric(df[col], errors='coerce').fillna(0).apply(np.floor).astype(int)
                 break
         
@@ -202,7 +195,6 @@ def combine_and_merge_royalty_data(royalty_files: List[Any], file_to_date_map: D
 
     combined_df = pd.concat(all_royalties, ignore_index=True)
 
-    # 2. Product Family Consolidation
     merged_royalty_df = combined_df.groupby(['Title', 'Author'], as_index=False).agg(
         {'Raw Royalty/Earnings': 'sum', 'Raw Units Sold': 'sum'}
     ).rename(columns={'Raw Royalty/Earnings': 'Total Royalty', 'Raw Units Sold': 'Total Units Sold'})
@@ -211,8 +203,7 @@ def combine_and_merge_royalty_data(royalty_files: List[Any], file_to_date_map: D
     return merged_royalty_df, combined_df
 
 
-# (The rest of the helper functions: clean_ads_data, map_campaign, calculate_metrics are unchanged)
-
+@st.cache_data
 def clean_ads_data(ads_file: Any) -> pd.DataFrame:
     """Standardizes Advertising data columns based on AdLabs structure."""
     df = load_data_from_uploader(ads_file, "Ads")
@@ -335,7 +326,6 @@ all_marketplaces = set()
 try:
     if royalty_files:
         for file in royalty_files:
-            # Use the new cached function
             date_found, marketplaces_found = get_royalty_file_metadata(file)
             if date_found:
                 file_to_date_map[file.name] = date_found
@@ -343,8 +333,7 @@ try:
             all_marketplaces.update(marketplaces_found)
 
 except Exception as e:
-    st.sidebar.error(f"**CRITICAL ERROR:** Failed to process royalty files metadata. App is halted. Error: {e}")
-    # Setting royalty_files to None ensures the dashboard doesn't attempt to run
+    st.sidebar.error(f"**CRITICAL ERROR:** Failed to process royalty files metadata. Error: {e}")
     royalty_files = None
     ads_file = None
 
@@ -359,7 +348,10 @@ if unique_dates:
         index=0
     )
 else:
-    st.sidebar.text_input("4. Reporting Month (N/A)", value="Upload Files", disabled=True)
+    # MANUAL FALLBACK: If auto-detection fails, provide a way to unblock the user
+    st.sidebar.warning("⚠️ Auto-detection failed. Please enter the month manually (e.g., 'September 2025').")
+    selected_month = st.sidebar.text_input("4. Reporting Month (Manual)", value="September 2025") # Default value from your snippets
+
 
 # 5. Marketplace Selector
 selected_marketplace = None
@@ -371,7 +363,14 @@ if all_marketplaces:
         index=0
     )
 else:
-    st.sidebar.text_input("5. Marketplace (N/A)", value="Upload Files", disabled=True)
+    # MANUAL FALLBACK: Use a default value if no marketplaces are found
+    st.sidebar.warning("⚠️ Marketplaces not detected. Defaulting to 'All Marketplaces'.")
+    marketplace_options = ["All Marketplaces", "Amazon.com", "Audible.com"]
+    selected_marketplace = st.sidebar.selectbox(
+        "5. Marketplace (Manual Fallback)", 
+        marketplace_options,
+        index=0
+    )
 # ----------------------------------------
 
 if "mappings" not in st.session_state:
@@ -397,7 +396,9 @@ if royalty_files and ads_file and selected_month and selected_marketplace:
         tab1, tab2, tab3 = st.tabs(["📊 Performance Summary", "📝 Campaign Mapping & Management", "📂 Data Feed / Raw Data"])
 
         with tab1:
+            # Dashboard content remains the same
             st.header(f"Performance Summary — {account} ({selected_marketplace}, {selected_month})")
+            # ... (KPIs, Metrics, Table display code is omitted for brevity in this explanation but included in the full code block) ...
             
             # Top-Level KPIs
             total_ad_spend = metrics_df["Ad Spend"].sum()
@@ -497,13 +498,12 @@ if royalty_files and ads_file and selected_month and selected_marketplace:
 
 
     else:
-        # Secondary Error/Guidance check for flow failure
         st.error("⚠️ **Dashboard cannot load.** Please check the following issues:")
         if not royalty_files or not ads_file:
             st.markdown("- **Upload Status:** Ensure both Royalty files (Step 2) and the Advertising file (Step 3) are uploaded.")
-        if royalty_files and not selected_month:
-            st.markdown("- **Date Selection:** Ensure the **Reporting Month** (Step 4) selector is populated and selected after files upload.")
-        if royalty_files and selected_month and royalty_df_merged.empty:
+        if selected_month in ["Upload Files", ""]:
+            st.markdown("- **Reporting Month:** If Step 4 is blank, use the **Manual Fallback** to enter the correct month (e.g., `September 2025`).")
+        if royalty_df_merged.empty:
             st.markdown(f"- **Royalty Data Filtered:** Could not find valid royalty data for **{selected_month}** in **{selected_marketplace}**. Try selecting **All Marketplaces**.")
         if ads_file and ads_df.empty:
             st.markdown("- **Advertising File:** Ensure your Ads file is a standard AdLabs export format (header row is correct).")
