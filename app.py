@@ -4,21 +4,31 @@ import numpy as np
 import re
 from io import StringIO, BytesIO
 from typing import Dict, List, Any
+# Import Plotly for visualizations
+import plotly.express as px
 
 # --- Page Configuration ---
 st.set_page_config(page_title="KDP Ads & Royalty Dashboard", layout="wide")
 
-# --- Custom Styling ---
+# --- Custom Styling (FIXED: Dual-Theme Compatible Metric Box) ---
 st.markdown("""
 <style>
 .stTabs [data-baseweb="tab-list"] {
     gap: 15px;
 }
+/* Updated Metric Box Style for Dual-Theme Visibility */
 .stMetric {
-    background-color: #f0f2f6;
+    /* Removing explicit background-color lets Streamlit handle light/dark mode */
+    /* by using the default app background or a transparent fill, 
+       which has better contrast with text color */
+    border: 1px solid rgba(150, 150, 150, 0.2); /* Subtle, theme-neutral border */
     border-radius: 10px;
-    padding: 10px;
-    box-shadow: 2px 2px 5px rgba(0,0,0,0.1);
+    padding: 15px; /* Increased padding */
+    box-shadow: 0px 4px 8px rgba(0,0,0,0.1); /* Clearer shadow */
+    transition: all 0.3s ease-in-out;
+}
+.stMetric:hover {
+    box-shadow: 0px 6px 12px rgba(0,0,0,0.15); /* Interactive hover effect */
 }
 </style>
 """, unsafe_allow_html=True)
@@ -95,17 +105,8 @@ def get_royalty_file_metadata(uploaded_file: Any) -> tuple[str | None, List[str]
     if not df.empty:
         df.columns = df.columns.astype(str).str.strip()
         if 'Marketplace' in df.columns:
-            # Use the robust cleaner here for detection
-            marketplaces = df['Marketplace'].apply(robust_clean_string).unique().tolist()
-            # Convert back to original format for display in the sidebar
-            marketplaces = [m for m in marketplaces if m and m != 'N/A']
-            # We will use the raw list from the file for display, but clean for filtering
-            
-            # Since the raw string is problematic, let's just use the cleaned version for detection
-            # The list below will populate the dropdown with cleaned names (e.g., 'AMAZON.COM')
             raw_marketplaces = df['Marketplace'].astype(str).str.strip().unique().tolist()
             marketplaces = [m for m in raw_marketplaces if m and m != 'N/A']
-            # This ensures the dropdown options are the actual strings present in the file
             
     return date_str if date_str and date_str.lower() != 'nan' else None, marketplaces
 
@@ -175,7 +176,6 @@ def combine_and_merge_royalty_data(royalty_files: List[Any], file_to_date_map: D
              df['Marketplace_Cleaned'] = df['Marketplace'].apply(robust_clean_string)
              df = df[df['Marketplace_Cleaned'] == selected_marketplace_cleaned].copy()
              
-             # The marketplace data might be useful for raw view, so let's keep the original and drop the temporary one
              df.drop(columns=['Marketplace_Cleaned'], inplace=True, errors='ignore')
              
              if df.empty:
@@ -202,7 +202,6 @@ def combine_and_merge_royalty_data(royalty_files: List[Any], file_to_date_map: D
             all_royalties.append(df[['Title', 'Author', 'Raw Royalty/Earnings', 'Raw Units Sold']])
 
     if not all_royalties:
-        # Revert back to the original error message, but the fix is implemented above
         st.error(f"Could not find valid royalty data for **{selected_month}** in **{selected_marketplace}**. Please ensure **'All Marketplaces'** is selected if this persists.")
         return pd.DataFrame(), pd.DataFrame()
 
@@ -364,7 +363,6 @@ else:
 # 5. Marketplace Selector
 selected_marketplace = None
 if all_marketplaces:
-    # Use the raw marketplace list to populate the dropdown
     marketplace_options = ["All Marketplaces"] + sorted(list(all_marketplaces))
     selected_marketplace = st.sidebar.selectbox(
         "5. Marketplace", 
@@ -373,7 +371,7 @@ if all_marketplaces:
     )
 else:
     st.sidebar.warning("⚠️ Marketplaces not detected. Defaulting to 'All Marketplaces'.")
-    marketplace_options = ["All Marketplaces", "AMAZON.COM", "AUDIBLE.COM"] # Using ALL CAPS as a hint to the user
+    marketplace_options = ["All Marketplaces", "Amazon.com", "Audible.com"]
     selected_marketplace = st.sidebar.selectbox(
         "5. Marketplace (Manual Fallback)", 
         marketplace_options,
@@ -409,7 +407,8 @@ if royalty_files and ads_file and selected_month and selected_marketplace and se
             # Top-Level KPIs
             total_ad_spend = metrics_df["Ad Spend"].sum()
             total_ad_sales = metrics_df["Ad Sales"].sum()
-            total_revenue = metrics_df["Total Royalty"].sum() + metrics_df["Ad Sales"].sum()
+            total_royalty = metrics_df["Total Royalty"].sum()
+            total_revenue = total_royalty + total_ad_sales
             total_units = metrics_df["Total Units Sold"].sum()
             
             overall_acos = (total_ad_spend / total_ad_sales * 100) if total_ad_sales > 0 else 0
@@ -419,8 +418,8 @@ if royalty_files and ads_file and selected_month and selected_marketplace and se
             col1, col2, col3 = st.columns(3)
             
             with col1:
-                st.metric("Total Revenue", f"${total_revenue:,.2f}")
-                st.metric("Total Ad Spend", f"${total_ad_spend:,.2f}")
+                st.metric("Total Revenue (Royalty + Ad Sales)", f"${total_revenue:,.2f}")
+                st.metric("Total Royalty", f"${total_royalty:,.2f}")
 
             with col2:
                 st.metric("Overall ACOS", f"{overall_acos:.1f}%")
@@ -428,7 +427,46 @@ if royalty_files and ads_file and selected_month and selected_marketplace and se
 
             with col3:
                 st.metric("Total Units Sold", f"{int(total_units):,}")
-                st.metric("Total Campaigns Mapped", f"{metrics_df['Campaign Count'].sum():,}")
+                st.metric("Total Ad Spend", f"${total_ad_spend:,.2f}")
+
+            st.markdown("---")
+            st.subheader("Product Visualizations")
+            
+            # --- Chart 1: Revenue Breakdown by Product ---
+            revenue_by_product = metrics_df.groupby('Title')[['Total Royalty', 'Ad Sales']].sum().reset_index()
+            revenue_by_product = revenue_by_product[revenue_by_product['Total Royalty'] + revenue_by_product['Ad Sales'] > 0]
+            
+            fig_revenue = px.bar(
+                revenue_by_product,
+                x='Title',
+                y=['Total Royalty', 'Ad Sales'],
+                title='Total Revenue Breakdown by Product (Royalty vs. Ad Sales)',
+                labels={'value': 'Revenue ($)', 'variable': 'Revenue Type', 'Title': 'Product Title'},
+                height=500
+            )
+            fig_revenue.update_layout(xaxis={'categoryorder':'total descending'}, legend_title_text='Revenue Source')
+            st.plotly_chart(fig_revenue, use_container_width=True)
+
+            # --- Chart 2: ACOS vs TACOS ---
+            # Filter out products with zero revenue as ACOS/TACOS would be misleading (infinity or zero)
+            metrics_chart_df = metrics_df[metrics_df['Total Revenue'] > 0].copy()
+            metrics_chart_df['Label'] = metrics_chart_df['Title'] + ' (' + metrics_chart_df['TACOS %'].round(1).astype(str) + '%)'
+            
+            fig_efficiency = px.scatter(
+                metrics_chart_df,
+                x='ACOS %',
+                y='TACOS %',
+                size='Total Revenue', # Size dots by revenue for impact
+                color='Title',
+                hover_name='Title',
+                text='Label',
+                title='Product Efficiency: ACOS vs. TACOS',
+                height=500
+            )
+            fig_efficiency.update_traces(textposition='top center')
+            fig_efficiency.update_layout(showlegend=False)
+            st.plotly_chart(fig_efficiency, use_container_width=True)
+
 
             st.markdown("---")
             st.subheader("Product Performance Table (Consolidated)")
@@ -510,7 +548,7 @@ if royalty_files and ads_file and selected_month and selected_marketplace and se
         if selected_month in ["Upload Files", ""]:
             st.markdown("- **Reporting Month:** If Step 4 is blank, use the **Manual Fallback** to enter the correct month (e.g., `September 2025`).")
         if royalty_df_merged.empty and royalty_files and selected_month not in ["Upload Files", ""]:
-            st.markdown(f"- **Royalty Data Filtered:** Could not find valid royalty data for **{selected_month}** in **{selected_marketplace}**. The most aggressive cleaning has been added. As a temporary workaround, **please select 'All Marketplaces' in Step 5**.")
+            st.markdown(f"- **Royalty Data Filtered:** Could not find valid royalty data for **{selected_month}** in **{selected_marketplace}**. The robust marketplace cleaning is now active. As a temporary workaround, **please select 'All Marketplaces' in Step 5**.")
         if ads_file and ads_df.empty:
             st.markdown("- **Advertising File:** Ensure your Ads file is a standard AdLabs export format (header row is correct). The column detection is now more robust against case and spacing.")
         
