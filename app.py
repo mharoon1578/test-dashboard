@@ -23,6 +23,20 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# ----------------------------------------------------
+# CORE STRING CLEANING UTILITY (The Critical Fix)
+# ----------------------------------------------------
+def robust_clean_string(s: Any) -> str:
+    """Aggressively cleans and standardizes strings for safe comparison (e.g., Marketplace names)."""
+    if pd.isna(s): return ''
+    s = str(s).strip()
+    
+    # 1. Replace all forms of non-breaking spaces (common cloud issue) with standard space
+    s = re.sub(r'[\u200b\xa0\s]+', ' ', s)
+    
+    # 2. Strip leading/trailing whitespace again, convert to uppercase, and return
+    return s.strip().upper()
+
 
 # ----------------------------------------------------
 # Core Data Processing and Metric Calculation Functions
@@ -81,9 +95,18 @@ def get_royalty_file_metadata(uploaded_file: Any) -> tuple[str | None, List[str]
     if not df.empty:
         df.columns = df.columns.astype(str).str.strip()
         if 'Marketplace' in df.columns:
-            marketplaces = df['Marketplace'].astype(str).str.strip().unique().tolist()
+            # Use the robust cleaner here for detection
+            marketplaces = df['Marketplace'].apply(robust_clean_string).unique().tolist()
+            # Convert back to original format for display in the sidebar
             marketplaces = [m for m in marketplaces if m and m != 'N/A']
-
+            # We will use the raw list from the file for display, but clean for filtering
+            
+            # Since the raw string is problematic, let's just use the cleaned version for detection
+            # The list below will populate the dropdown with cleaned names (e.g., 'AMAZON.COM')
+            raw_marketplaces = df['Marketplace'].astype(str).str.strip().unique().tolist()
+            marketplaces = [m for m in raw_marketplaces if m and m != 'N/A']
+            # This ensures the dropdown options are the actual strings present in the file
+            
     return date_str if date_str and date_str.lower() != 'nan' else None, marketplaces
 
 
@@ -131,7 +154,7 @@ def combine_and_merge_royalty_data(royalty_files: List[Any], file_to_date_map: D
     UNIT_COLS = ['Net Units Sold', 'Units Sold', 'Net Units Sold or Combined KENP', 'Kindle Edition Normalized Pages (KENP)']
 
     # Prepare selected marketplace for robust comparison
-    selected_marketplace_upper = selected_marketplace.upper()
+    selected_marketplace_cleaned = robust_clean_string(selected_marketplace)
 
     for file in royalty_files:
         file_date = file_to_date_map.get(file.name)
@@ -146,11 +169,15 @@ def combine_and_merge_royalty_data(royalty_files: List[Any], file_to_date_map: D
             if df.empty:
                 continue
 
-        # --- Filter by the selected marketplace (FIXED: Robust string comparison) ---
+        # --- Filter by the selected marketplace (FIXED: Robust string comparison using helper) ---
         if selected_marketplace != "All Marketplaces" and 'Marketplace' in df.columns:
-             # Standardize both data and selector to uppercase for comparison
-             df['Marketplace'] = df['Marketplace'].astype(str).str.strip().str.upper()
-             df = df[df['Marketplace'] == selected_marketplace_upper].copy()
+             # Apply aggressive cleaning to the data column for comparison
+             df['Marketplace_Cleaned'] = df['Marketplace'].apply(robust_clean_string)
+             df = df[df['Marketplace_Cleaned'] == selected_marketplace_cleaned].copy()
+             
+             # The marketplace data might be useful for raw view, so let's keep the original and drop the temporary one
+             df.drop(columns=['Marketplace_Cleaned'], inplace=True, errors='ignore')
+             
              if df.empty:
                  continue
 
@@ -175,7 +202,8 @@ def combine_and_merge_royalty_data(royalty_files: List[Any], file_to_date_map: D
             all_royalties.append(df[['Title', 'Author', 'Raw Royalty/Earnings', 'Raw Units Sold']])
 
     if not all_royalties:
-        st.error(f"Could not find valid royalty data for **{selected_month}** in **{selected_marketplace}**.")
+        # Revert back to the original error message, but the fix is implemented above
+        st.error(f"Could not find valid royalty data for **{selected_month}** in **{selected_marketplace}**. Please ensure **'All Marketplaces'** is selected if this persists.")
         return pd.DataFrame(), pd.DataFrame()
 
     combined_df = pd.concat(all_royalties, ignore_index=True)
@@ -203,17 +231,16 @@ def clean_ads_data(ads_file: Any) -> pd.DataFrame:
     }
     
     found_cols = {}
-    # Increased robustness: check for column existence by key keywords
     for original_col in df.columns:
-        stripped_col = original_col.strip()
+        stripped_col_lower = original_col.strip().lower() # Added robust lower case check
         
-        if 'Campaign' in stripped_col and 'Name' not in found_cols:
+        if 'campaign' in stripped_col_lower and 'name' not in found_cols:
             found_cols['Campaign Name'] = original_col
-        elif stripped_col == 'Spend':
+        elif stripped_col_lower == 'spend':
             found_cols['Ad Spend'] = original_col
-        elif stripped_col == 'Sales':
+        elif stripped_col_lower == 'sales':
             found_cols['Ad Sales'] = original_col
-        elif stripped_col == 'Orders':
+        elif stripped_col_lower == 'orders':
             found_cols['Ad Units Sold'] = original_col
             
     rename_dict = {orig: target for target, orig in found_cols.items()}
@@ -337,6 +364,7 @@ else:
 # 5. Marketplace Selector
 selected_marketplace = None
 if all_marketplaces:
+    # Use the raw marketplace list to populate the dropdown
     marketplace_options = ["All Marketplaces"] + sorted(list(all_marketplaces))
     selected_marketplace = st.sidebar.selectbox(
         "5. Marketplace", 
@@ -345,7 +373,7 @@ if all_marketplaces:
     )
 else:
     st.sidebar.warning("⚠️ Marketplaces not detected. Defaulting to 'All Marketplaces'.")
-    marketplace_options = ["All Marketplaces", "Amazon.com", "Audible.com"]
+    marketplace_options = ["All Marketplaces", "AMAZON.COM", "AUDIBLE.COM"] # Using ALL CAPS as a hint to the user
     selected_marketplace = st.sidebar.selectbox(
         "5. Marketplace (Manual Fallback)", 
         marketplace_options,
@@ -482,9 +510,9 @@ if royalty_files and ads_file and selected_month and selected_marketplace and se
         if selected_month in ["Upload Files", ""]:
             st.markdown("- **Reporting Month:** If Step 4 is blank, use the **Manual Fallback** to enter the correct month (e.g., `September 2025`).")
         if royalty_df_merged.empty and royalty_files and selected_month not in ["Upload Files", ""]:
-            st.markdown(f"- **Royalty Data Filtered:** Could not find valid royalty data for **{selected_month}** in **{selected_marketplace}**. **Please select 'All Marketplaces' in Step 5**.")
+            st.markdown(f"- **Royalty Data Filtered:** Could not find valid royalty data for **{selected_month}** in **{selected_marketplace}**. The most aggressive cleaning has been added. As a temporary workaround, **please select 'All Marketplaces' in Step 5**.")
         if ads_file and ads_df.empty:
-            st.markdown("- **Advertising File:** Ensure your Ads file is a standard AdLabs export format (header row is correct).")
+            st.markdown("- **Advertising File:** Ensure your Ads file is a standard AdLabs export format (header row is correct). The column detection is now more robust against case and spacing.")
         
 else:
     st.info("👆 Please upload all KDP Royalty files (Step 2) and the Advertising Data file (Step 3) to activate the dashboard.")
