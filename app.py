@@ -208,8 +208,9 @@ def combine_and_merge_royalty_data(royalty_files: List[Any], file_to_date_map: D
 
     combined_df = pd.concat(all_royalties, ignore_index=True)
 
-    merged_royalty_df = combined_df.groupby(['Title', 'Author'], as_index=False).agg(
-        {'Raw Royalty/Earnings': 'sum', 'Raw Units Sold': 'sum'}
+    # FIXED: Group by Title only to combine all formats of the same book
+    merged_royalty_df = combined_df.groupby(['Title'], as_index=False).agg(
+        {'Raw Royalty/Earnings': 'sum', 'Raw Units Sold': 'sum', 'Author': 'first'}
     ).rename(columns={'Raw Royalty/Earnings': 'Total Royalty', 'Raw Units Sold': 'Total Units Sold'})
     
     st.success(f"Merged **{files_processed}** Royalty files for **{selected_month}** in **{selected_marketplace}** into **{len(merged_royalty_df)}** Product Families.")
@@ -307,8 +308,9 @@ def calculate_metrics(ads_df, royalties_df, mappings):
     for col in cols_to_fill:
         if col in merged.columns:
             merged[col].fillna(0, inplace=True)
-            
-    merged["Total Revenue"] = merged["Total Royalty"] + merged["Ad Sales"]
+    
+    # FIXED: Total Revenue is just the Total Royalty from KDP
+    merged["Total Revenue"] = merged["Total Royalty"]
     
     merged["ACOS %"] = np.where(
         merged["Ad Sales"] > 0,
@@ -316,6 +318,7 @@ def calculate_metrics(ads_df, royalties_df, mappings):
         0
     )
     
+    # FIXED: TACOS calculation now uses Total Revenue (which is just Total Royalty)
     merged["TACOS %"] = np.where(
         merged["Total Revenue"] > 0,
         (merged["Ad Spend"] / merged["Total Revenue"]) * 100,
@@ -466,18 +469,17 @@ if royalty_files and ads_file and selected_month and selected_marketplace and se
             total_ad_spend = metrics_df["Ad Spend"].sum()
             total_ad_sales = metrics_df["Ad Sales"].sum()
             total_royalty = metrics_df["Total Royalty"].sum()
-            total_revenue = total_royalty + total_ad_sales
+            total_revenue = total_royalty  # FIXED: Total Revenue is just Total Royalty
             total_units = metrics_df["Total Units Sold"].sum()
             
             overall_acos = (total_ad_spend / total_ad_sales * 100) if total_ad_sales > 0 else 0
             overall_tacos = (total_ad_spend / total_revenue * 100) if total_revenue > 0 else 0
 
-            # Grouped Metric Display for better visibility
+            # FIXED: Updated metrics display to remove redundant Total Royalty
             col1, col2, col3 = st.columns(3)
             
             with col1:
-                st.metric("Total Revenue (Royalty + Ad Sales)", f"${total_revenue:,.2f}")
-                st.metric("Total Royalty", f"${total_royalty:,.2f}")
+                st.metric("Total Revenue", f"${total_revenue:,.2f}")
 
             with col2:
                 st.metric("Overall ACOS", f"{overall_acos:.1f}%")
@@ -528,8 +530,9 @@ if royalty_files and ads_file and selected_month and selected_marketplace and se
             st.markdown("---")
             st.subheader("Product Performance Table (Consolidated)")
             
+            # FIXED: Updated display columns to remove redundant Total Royalty
             display_cols = [
-                "Title", "Author", "Total Revenue", "Total Royalty", "Ad Spend", 
+                "Title", "Author", "Total Revenue", "Ad Spend", 
                 "Ad Sales", "Total Units Sold", "Campaign Count", "ACOS %", "TACOS %"
             ]
             st.dataframe(
