@@ -307,7 +307,7 @@ def map_campaign(name: str, mappings: Dict[str, str]) -> str:
 
 @st.cache_data
 def calculate_metrics(ads_df: pd.DataFrame, royalties_df: pd.DataFrame, mappings: Dict[str, str]) -> pd.DataFrame:
-    """Calculate comprehensive metrics."""
+    """Calculate comprehensive metrics with proper unmapped handling."""
     if ads_df.empty or royalties_df.empty:
         return pd.DataFrame()
     
@@ -337,10 +337,20 @@ def calculate_metrics(ads_df: pd.DataFrame, royalties_df: pd.DataFrame, mappings
     
     # Calculate metrics
     merged['Total Revenue'] = merged['Total Royalty']  # Total Revenue is just royalty
-    merged['ACOS %'] = np.where(merged['Ad Sales'] > 0, 
-                               (merged['Ad Spend'] / merged['Ad Sales']) * 100, 0)
-    merged['TACOS %'] = np.where(merged['Total Revenue'] > 0,
-                                (merged['Ad Spend'] / merged['Total Revenue']) * 100, 0)
+    
+    # FIXED: Only calculate ACOS for products with actual Ad Sales
+    merged['ACOS %'] = np.where(
+        (merged['Ad Sales'] > 0) & (merged['Title'] != 'Unmapped'),
+        (merged['Ad Spend'] / merged['Ad Sales']) * 100,
+        0
+    )
+    
+    # FIXED: Only calculate TACOS for products with actual Total Revenue
+    merged['TACOS %'] = np.where(
+        (merged['Total Revenue'] > 0) & (merged['Title'] != 'Unmapped'),
+        (merged['Ad Spend'] / merged['Total Revenue']) * 100,
+        0
+    )
     
     # Convert to appropriate types
     merged['Total Units Sold'] = merged['Total Units Sold'].astype(int)
@@ -488,30 +498,42 @@ if royalty_files and ads_file and selected_month and selected_marketplace:
             st.markdown("---")
             st.subheader("Product Performance")
             
-            # Revenue breakdown chart
+            # Revenue breakdown chart - FIXED: Filter out Unmapped
             revenue_by_product = metrics_df.groupby('Title')[['Total Royalty', 'Ad Sales']].sum().reset_index()
+            
+            # FIXED: Filter out Unmapped from visualization
+            revenue_by_product = revenue_by_product[revenue_by_product['Title'] != 'Unmapped']
+            
+            # Only show products with actual revenue
             revenue_by_product = revenue_by_product[revenue_by_product['Total Royalty'] + revenue_by_product['Ad Sales'] > 0]
             
             fig_revenue = px.bar(
                 revenue_by_product,
                 x='Title',
                 y=['Total Royalty', 'Ad Sales'],
-                title='Revenue Breakdown by Product',
+                title='Total Revenue Breakdown by Product (Royalty vs. Ad Sales)',
                 labels={'value': 'Revenue ($)', 'variable': 'Revenue Type', 'Title': 'Product'},
                 height=500
             )
             fig_revenue.update_layout(xaxis={'categoryorder': 'total descending'})
             st.plotly_chart(fig_revenue, use_container_width=True)
             
-            # Performance table
+            # Performance table - FIXED: Filter out Unmapped
+            display_df = metrics_df[metrics_df['Title'] != 'Unmapped'].copy()
+            
             display_cols = [
                 "Title", "Author", "Total Revenue", "Ad Spend", 
                 "Ad Sales", "Total Units Sold", "Campaign Count", "ACOS %", "TACOS %"
             ]
             st.dataframe(
-                metrics_df[display_cols].sort_values("Total Revenue", ascending=False),
+                display_df[display_cols].sort_values("Total Revenue", ascending=False),
                 use_container_width=True
             )
+            
+            # Show unmapped warning if needed
+            unmapped_spend = metrics_df[metrics_df['Title'] == 'Unmapped']['Ad Spend'].sum()
+            if unmapped_spend > 0:
+                st.warning(f"⚠️ **${unmapped_spend:,.2f}** in Ad Spend is currently **UNMAPPED**! Use the Campaign Mapping tab to fix this.")
         
         with tab2:
             st.header("Campaign Mapping & Management")
