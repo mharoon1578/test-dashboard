@@ -33,6 +33,10 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# Initialize mappings state if not present
+if "mappings" not in st.session_state:
+    st.session_state["mappings"] = {}
+
 # ----------------------------------------------------
 # CORE STRING CLEANING UTILITY (The Critical Fix)
 # ----------------------------------------------------
@@ -46,7 +50,6 @@ def robust_clean_string(s: Any) -> str:
     
     # 2. Strip leading/trailing whitespace again, convert to uppercase, and return
     return s.strip().upper()
-
 
 # ----------------------------------------------------
 # Core Data Processing and Metric Calculation Functions
@@ -70,7 +73,6 @@ def load_df(uploaded_file: Any, file_type: str, header_index: int) -> pd.DataFra
         return df
     except Exception:
         return pd.DataFrame()
-
 
 @st.cache_data(show_spinner=False)
 def get_royalty_file_metadata(uploaded_file: Any) -> tuple[str | None, List[str]]:
@@ -109,7 +111,6 @@ def get_royalty_file_metadata(uploaded_file: Any) -> tuple[str | None, List[str]
             marketplaces = [m for m in raw_marketplaces if m and m != 'N/A']
             
     return date_str if date_str and date_str.lower() != 'nan' else None, marketplaces
-
 
 @st.cache_data
 def load_data_from_uploader(uploaded_file: Any, file_type: str, file_date: str | None = None) -> pd.DataFrame:
@@ -214,7 +215,6 @@ def combine_and_merge_royalty_data(royalty_files: List[Any], file_to_date_map: D
     st.success(f"Merged **{files_processed}** Royalty files for **{selected_month}** in **{selected_marketplace}** into **{len(merged_royalty_df)}** Product Families.")
     return merged_royalty_df, combined_df
 
-
 @st.cache_data
 def clean_ads_data(ads_file: Any) -> pd.DataFrame:
     """Standardizes Advertising data columns based on AdLabs structure."""
@@ -257,13 +257,17 @@ def clean_ads_data(ads_file: Any) -> pd.DataFrame:
 
     return df
 
-
 def map_campaign(name, mappings):
-    """Applies campaign mappings (Rule -> Product)"""
-    name = str(name)
+    """Applies campaign mappings (Rule -> Product) with improved robustness"""
+    name = str(name).strip().lower()  # Normalize the campaign name
     for rule, product in mappings.items():
-        if re.search(rule, name, re.IGNORECASE):
-            return product
+        try:
+            if re.search(rule.lower(), name, re.IGNORECASE):
+                return product
+        except re.error:
+            # Handle invalid regex patterns gracefully
+            if rule.lower() in name:
+                return product
     return "Unmapped"
 
 @st.cache_data
@@ -272,9 +276,19 @@ def calculate_metrics(ads_df, royalties_df, mappings):
     
     ads_df = ads_df.reset_index(drop=True) 
     
-    ads_df["Mapped Product"] = ads_df["Campaign Name"].apply(
-        lambda x: map_campaign(x, mappings)
-    )
+    # Validate mappings dictionary
+    if not isinstance(mappings, dict):
+        st.error("Invalid mappings format. Resetting mappings.")
+        mappings = {}
+    
+    # Apply mappings with error handling
+    try:
+        ads_df["Mapped Product"] = ads_df["Campaign Name"].apply(
+            lambda x: map_campaign(x, mappings)
+        )
+    except Exception as e:
+        st.error(f"Error applying mappings: {str(e)}")
+        ads_df["Mapped Product"] = "Unmapped"
     
     ad_summary = ads_df.groupby("Mapped Product").agg({
         "Ad Spend": "sum",
@@ -312,6 +326,54 @@ def calculate_metrics(ads_df, royalties_df, mappings):
     merged['Campaign Count'] = merged['Campaign Count'].astype(int)
     
     return merged
+
+def render_mapping_management():
+    """Renders the mapping management section"""
+    st.markdown("---")
+    st.subheader("Current Mappings (Keyword → Product)")
+    
+    if not st.session_state["mappings"]:
+        st.info("No mapping rules defined yet. Add your first rule above.")
+        return
+
+    # Display current mappings
+    for rule, product in dict(st.session_state["mappings"]).items():
+        col1, col2, col3 = st.columns([2, 2, 1])
+        with col1:
+            st.code(rule)
+        with col2:
+            st.write(product)
+        with col3:
+            if st.button("🗑️", key=f"del_{rule}"):
+                del st.session_state["mappings"][rule]
+                st.rerun()
+
+def display_mapping_stats(ads_df):
+    """Displays mapping statistics and validation results"""
+    ads_df_temp = ads_df.copy()
+    ads_df_temp["Mapped Product"] = ads_df_temp["Campaign Name"].apply(
+        lambda x: map_campaign(x, st.session_state["mappings"])
+    )
+
+    total_spend = ads_df_temp["Ad Spend"].sum()
+    unmapped = ads_df_temp[ads_df_temp["Mapped Product"] == "Unmapped"]
+    unmapped_spend = unmapped["Ad Spend"].sum()
+    
+    if total_spend > 0:
+        mapped_percentage = ((total_spend - unmapped_spend) / total_spend) * 100
+        st.metric("Mapping Coverage", f"{mapped_percentage:.1f}%")
+    
+    if not unmapped.empty:
+        st.warning(f"⚠️ **${unmapped_spend:,.2f}** in Ad Spend is currently **UNMAPPED**!")
+        st.info(f"You have **{len(unmapped['Campaign Name'].unique())}** unique unmapped campaigns.")
+        
+        # Show unmapped campaigns sorted by spend
+        unmapped_summary = unmapped.groupby('Campaign Name').agg({
+            'Ad Spend': 'sum',
+            'Ad Sales': 'sum'
+        }).sort_values(by='Ad Spend', ascending=False).reset_index()
+        
+        st.dataframe(unmapped_summary, use_container_width=True)
 
 # ----------------------------------------------------
 # Sidebar: Upload & Config
@@ -359,7 +421,6 @@ else:
     st.sidebar.warning("⚠️ Auto-detection failed. Please enter the month manually (e.g., 'September 2025').")
     selected_month = st.sidebar.text_input("4. Reporting Month (Manual)", value="September 2025") # Defaulted based on your files
 
-
 # 5. Marketplace Selector
 selected_marketplace = None
 if all_marketplaces:
@@ -378,9 +439,6 @@ else:
         index=0
     )
 # ----------------------------------------
-
-if "mappings" not in st.session_state:
-    st.session_state["mappings"] = {}
 
 # ----------------------------------------------------
 # Main Dashboard Logic
@@ -467,7 +525,6 @@ if royalty_files and ads_file and selected_month and selected_marketplace and se
             fig_efficiency.update_layout(showlegend=False)
             st.plotly_chart(fig_efficiency, use_container_width=True)
 
-
             st.markdown("---")
             st.subheader("Product Performance Table (Consolidated)")
             
@@ -486,7 +543,8 @@ if royalty_files and ads_file and selected_month and selected_marketplace and se
 
         with tab2:
             st.header("Campaign Mapping & Management (Self-Service)")
-
+            
+            # Add mapping form
             with st.form("mapping_form"):
                 st.subheader("Add New Mapping Rule")
                 
@@ -496,38 +554,20 @@ if royalty_files and ads_file and selected_month and selected_marketplace and se
                 new_rule = st.text_input("Mapping Keyword (e.g., 'book_title_keyword' found in campaign name)", key="map_rule")
                 
                 submitted = st.form_submit_button("Add Mapping Rule")
-
+                
                 if submitted:
                     if new_rule and new_product:
                         st.session_state["mappings"][new_rule.lower()] = new_product
                         st.success(f"Rule added: **'{new_rule}'** → **{new_product}**.")
-                        st.rerun()  # Updated to use the new method
+                        st.rerun()  # Changed from st.experimental_rerun()
                     else:
                         st.warning("Please enter a keyword and select a product.")
             
-            st.markdown("---")
-            st.subheader("Unmapped Campaigns to Address")
+            # Display mapping management
+            render_mapping_management()
             
-            ads_df_temp = ads_df.copy()
-            ads_df_temp["Mapped Product"] = ads_df_temp["Campaign Name"].apply(
-                 lambda x: map_campaign(x, st.session_state["mappings"])
-            )
-
-            current_unmapped = ads_df_temp[ads_df_temp["Mapped Product"] == "Unmapped"]
-            
-            if current_unmapped.empty:
-                st.success("✅ All campaigns are currently mapped (or have zero spend)! You are good to go.")
-            else:
-                st.info(f"You have **{len(current_unmapped['Campaign Name'].unique())}** unique unmapped campaigns (total spend: ${current_unmapped['Ad Spend'].sum():,.2f}).")
-                unmapped_summary = current_unmapped.groupby('Campaign Name').agg(
-                    {'Ad Spend': 'sum', 'Ad Sales': 'sum'}
-                ).sort_values(by='Ad Spend', ascending=False).reset_index()
-                
-                st.dataframe(unmapped_summary, use_container_width=True)
-                
-            st.markdown("---")
-            st.subheader("Current Mappings (Keyword → Product)")
-            st.json(st.session_state["mappings"])
+            # Show mapping statistics
+            display_mapping_stats(ads_df)
 
         with tab3:
             st.header("Data Feed / Raw Data View")
@@ -539,7 +579,6 @@ if royalty_files and ads_file and selected_month and selected_marketplace and se
             st.markdown("---")
             st.subheader(f"Raw Combined Royalty Data (Filtered for {selected_marketplace}, {selected_month})")
             st.dataframe(raw_royalty_combined, use_container_width=True)
-
 
     else:
         st.error("⚠️ **Dashboard cannot load.** Please check the following issues:")
