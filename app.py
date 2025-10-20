@@ -497,7 +497,7 @@ if royalty_files and ads_file and selected_month and selected_marketplace and se
                 
                 submitted = st.form_submit_button("Add Mapping Rule")
 
-               if submitted:
+                if submitted:
                     if new_rule and new_product:
                         st.session_state["mappings"][new_rule.lower()] = new_product
                         st.success(f"Rule added: **'{new_rule}'** → **{new_product}**.")
