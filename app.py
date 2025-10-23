@@ -5,7 +5,7 @@ import re
 from io import StringIO, BytesIO
 from typing import Dict, List, Any, Tuple
 import plotly.express as px
-import hashlib
+import os
 
 # --- Page Configuration ---
 st.set_page_config(page_title="KDP Ads & Royalty Dashboard", layout="wide")
@@ -29,18 +29,48 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Initialize session state
+# ----------------------------------------------------
+# SECURE CONFIGURATION MANAGEMENT
+# ----------------------------------------------------
+def get_accounts():
+    """Get accounts from secrets or use defaults for development"""
+    accounts = {}
+    
+    # Try to get accounts from secrets
+    if hasattr(st.secrets, "accounts"):
+        for account_name, account_data in st.secrets["accounts"].items():
+            accounts[account_name] = {
+                "password": account_data.get("password", ""),
+                "description": account_data.get("description", "")
+            }
+    else:
+        # Default accounts for development (only used if no secrets configured)
+        st.warning("⚠️ Running in development mode. Please configure secrets for production.")
+        accounts = {
+            "CuriousPress": {
+                "password": "curious123",
+                "description": "Main account"
+            },
+            "Client A": {
+                "password": "clienta123", 
+                "description": "Test client A"
+            },
+            "Client B": {
+                "password": "clientb123",
+                "description": "Test client B"
+            }
+        }
+    
+    return accounts
+
 def init_session_state():
     """Initialize all session state variables"""
     defaults = {
         "mappings": {},
         "excluded_campaigns": [],
         "current_account": None,
-        "accounts": {
-            "CuriousPress": {"password": hashlib.md5("curious123".encode()).hexdigest()},
-            "Client A": {"password": hashlib.md5("clienta123".encode()).hexdigest()},
-            "Client B": {"password": hashlib.md5("clientb123".encode()).hexdigest()}
-        },
+        "authenticated": False,
+        "login_attempts": 0,
         "show_add_account": False,
         "ads_files_data": {}  # Store processed ads data
     }
@@ -57,32 +87,71 @@ init_session_state()
 # ----------------------------------------------------
 def check_login():
     """Check if user is logged in, show login form if not"""
-    if st.session_state.current_account is None:
+    if not st.session_state.get("authenticated", False):
         st.title("KDP Ads & Royalty Dashboard - Login")
         
+        # Check for too many failed attempts
+        if st.session_state.get("login_attempts", 0) >= 5:
+            st.error("Too many failed login attempts. Please refresh the page to try again.")
+            return False
+        
         with st.form("login_form"):
-            username = st.selectbox("Select Account", list(st.session_state.accounts.keys()))
+            accounts = get_accounts()
+            account_names = list(accounts.keys())
+            
+            if not account_names:
+                st.error("No accounts configured. Please check your secrets configuration.")
+                return False
+            
+            username = st.selectbox("Select Account", account_names)
             password = st.text_input("Password", type="password")
             submitted = st.form_submit_button("Login")
             
             if submitted:
-                if hashlib.md5(password.encode()).hexdigest() == st.session_state.accounts[username]["password"]:
+                stored_password = accounts[username]["password"]
+                
+                if password == stored_password:
                     st.session_state.current_account = username
+                    st.session_state.authenticated = True
+                    st.session_state.login_attempts = 0
                     st.success(f"Logged in as {username}")
                     st.rerun()
                 else:
-                    st.error("Invalid password")
+                    st.session_state.login_attempts += 1
+                    remaining_attempts = 5 - st.session_state.login_attempts
+                    st.error(f"Invalid password. {remaining_attempts} attempts remaining.")
         
-        st.info("Default passwords:")
-        st.code("CuriousPress: curious123\nClient A: clienta123\nClient B: clientb123")
+        # Show account descriptions if available
+        accounts = get_accounts()
+        if any(account.get("description") for account in accounts.values()):
+            st.info("Available Accounts:")
+            for name, data in accounts.items():
+                desc = data.get("description", "")
+                if desc:
+                    st.write(f"• **{name}**: {desc}")
+        
         return False
     return True
 
 def logout():
     """Logout function"""
     if st.sidebar.button("Logout"):
+        st.session_state.authenticated = False
         st.session_state.current_account = None
+        st.session_state.login_attempts = 0
         st.rerun()
+
+def add_account(username: str, password: str, description: str = ""):
+    """Add a new account (for development only)"""
+    if not st.secrets.get("accounts"):
+        st.session_state.accounts = st.session_state.get("accounts", {})
+        st.session_state.accounts[username] = {
+            "password": password,
+            "description": description
+        }
+        st.success(f"Account {username} added successfully!")
+        return True
+    return False
 
 # ----------------------------------------------------
 # CORE STRING CLEANING UTILITY
@@ -528,25 +597,24 @@ if check_login():
     st.sidebar.header(f"Upload & Settings - {st.session_state.current_account}")
     logout()
     
-    # Account management
-    with st.sidebar.expander("Account Management"):
-        if st.button("Add New Account"):
-            st.session_state.show_add_account = True
-    
-    # Add new account dialog
-    if st.session_state.get("show_add_account", False):
-        with st.sidebar.form("add_account_form"):
-            new_account = st.text_input("New Account Name")
-            new_password = st.text_input("Password", type="password")
-            submitted = st.form_submit_button("Add Account")
-            
-            if submitted and new_account:
-                st.session_state.accounts[new_account] = {
-                    "password": hashlib.md5(new_password.encode()).hexdigest()
-                }
-                st.success(f"Account {new_account} added successfully!")
-                st.session_state.show_add_account = False
-                st.rerun()
+    # Account management (only in development mode)
+    if not hasattr(st.secrets, "accounts"):
+        with st.sidebar.expander("Account Management (Development Only)"):
+            if st.button("Add New Account"):
+                st.session_state.show_add_account = True
+        
+        # Add new account dialog
+        if st.session_state.get("show_add_account", False):
+            with st.sidebar.form("add_account_form"):
+                new_account = st.text_input("New Account Name")
+                new_password = st.text_input("Password", type="password")
+                new_description = st.text_input("Description (optional)")
+                submitted = st.form_submit_button("Add Account")
+                
+                if submitted and new_account:
+                    if add_account(new_account, new_password, new_description):
+                        st.session_state.show_add_account = False
+                        st.rerun()
     
     royalty_files = st.sidebar.file_uploader(
         "2. Upload KDP Royalty Files (Excel with multiple sheets)",
