@@ -5,6 +5,7 @@ import re
 from io import StringIO, BytesIO
 from typing import Dict, List, Any, Tuple
 import plotly.express as px
+import hashlib
 
 # --- Page Configuration ---
 st.set_page_config(page_title="KDP Ads & Royalty Dashboard", layout="wide")
@@ -31,6 +32,48 @@ st.markdown("""
 # Initialize session state
 if "mappings" not in st.session_state:
     st.session_state["mappings"] = {}
+if "excluded_campaigns" not in st.session_state:
+    st.session_state["excluded_campaigns"] = []
+if "current_account" not in st.session_state:
+    st.session_state["current_account"] = None
+if "accounts" not in st.session_state:
+    st.session_state["accounts"] = {
+        "CuriousPress": {"password": hashlib.md5("curious123".encode()).hexdigest()},
+        "Client A": {"password": hashlib.md5("clienta123".encode()).hexdigest()},
+        "Client B": {"password": hashlib.md5("clientb123".encode()).hexdigest()}
+    }
+
+# ----------------------------------------------------
+# AUTHENTICATION FUNCTIONS
+# ----------------------------------------------------
+def check_login():
+    """Check if user is logged in, show login form if not"""
+    if st.session_state.current_account is None:
+        st.title("KDP Ads & Royalty Dashboard - Login")
+        
+        with st.form("login_form"):
+            username = st.selectbox("Select Account", list(st.session_state.accounts.keys()))
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Login")
+            
+            if submitted:
+                if hashlib.md5(password.encode()).hexdigest() == st.session_state.accounts[username]["password"]:
+                    st.session_state.current_account = username
+                    st.success(f"Logged in as {username}")
+                    st.rerun()
+                else:
+                    st.error("Invalid password")
+        
+        st.info("Default passwords:")
+        st.code("CuriousPress: curious123\nClient A: clienta123\nClient B: clientb123")
+        return False
+    return True
+
+def logout():
+    """Logout function"""
+    if st.sidebar.button("Logout"):
+        st.session_state.current_account = None
+        st.rerun()
 
 # ----------------------------------------------------
 # CORE STRING CLEANING UTILITY
@@ -254,11 +297,15 @@ def combine_and_merge_royalty_data(royalty_files: List[Any], file_to_date_map: D
     return merged_royalty_df, combined_df
 
 @st.cache_data
-def clean_ads_data(ads_file: Any) -> pd.DataFrame:
+def clean_ads_data(ads_file: Any, marketplace: str = None) -> pd.DataFrame:
     """Standardize Advertising data columns."""
     df = load_df(ads_file, "Ads", 0)
     if df.empty:
         return pd.DataFrame()
+    
+    # Add marketplace information if provided
+    if marketplace:
+        df['Marketplace'] = marketplace
     
     # Map columns to standard names
     column_mapping = {}
@@ -306,10 +353,14 @@ def map_campaign(name: str, mappings: Dict[str, str]) -> str:
     return "Unmapped"
 
 @st.cache_data
-def calculate_metrics(ads_df: pd.DataFrame, royalties_df: pd.DataFrame, mappings: Dict[str, str]) -> pd.DataFrame:
+def calculate_metrics(ads_df: pd.DataFrame, royalties_df: pd.DataFrame, mappings: Dict[str, str], excluded_campaigns: List[str]) -> pd.DataFrame:
     """Calculate comprehensive metrics with proper unmapped handling."""
     if ads_df.empty or royalties_df.empty:
         return pd.DataFrame()
+    
+    # Filter out excluded campaigns
+    if excluded_campaigns:
+        ads_df = ads_df[~ads_df['Campaign Name'].isin(excluded_campaigns)]
     
     # Apply mappings
     ads_df['Mapped Product'] = ads_df['Campaign Name'].apply(lambda x: map_campaign(x, mappings))
@@ -337,6 +388,9 @@ def calculate_metrics(ads_df: pd.DataFrame, royalties_df: pd.DataFrame, mappings
     
     # Calculate metrics
     merged['Total Revenue'] = merged['Total Royalty']  # Total Revenue is just royalty
+    
+    # Calculate Profit (Total Revenue - Ad Spend)
+    merged['Profit'] = merged['Total Revenue'] - merged['Ad Spend']
     
     # FIXED: Only calculate ACOS for products with actual Ad Sales
     merged['ACOS %'] = np.where(
@@ -378,6 +432,51 @@ def render_mapping_management(royalty_df: pd.DataFrame):
                 del st.session_state["mappings"][rule]
                 st.rerun()
 
+def render_excluded_campaigns(ads_df: pd.DataFrame):
+    """Render excluded campaigns management interface."""
+    st.markdown("---")
+    st.subheader("Excluded Campaigns Management")
+    
+    if ads_df.empty:
+        st.info("No advertising data available to exclude.")
+        return
+    
+    # Get all campaign names
+    all_campaigns = ads_df['Campaign Name'].unique().tolist()
+    
+    # Show current excluded campaigns
+    if st.session_state["excluded_campaigns"]:
+        st.write("**Currently Excluded Campaigns:**")
+        for campaign in st.session_state["excluded_campaigns"]:
+            col1, col2 = st.columns([4, 1])
+            with col1:
+                st.write(campaign)
+            with col2:
+                if st.button("Remove", key=f"remove_excl_{campaign}"):
+                    st.session_state["excluded_campaigns"].remove(campaign)
+                    st.rerun()
+    else:
+        st.info("No campaigns are currently excluded.")
+    
+    # Add new excluded campaigns
+    st.write("**Add Campaigns to Exclude:**")
+    available_to_exclude = [c for c in all_campaigns if c not in st.session_state["excluded_campaigns"]]
+    
+    if available_to_exclude:
+        selected_campaigns = st.multiselect(
+            "Select campaigns to exclude from calculations",
+            available_to_exclude
+        )
+        
+        if st.button("Exclude Selected Campaigns"):
+            for campaign in selected_campaigns:
+                if campaign not in st.session_state["excluded_campaigns"]:
+                    st.session_state["excluded_campaigns"].append(campaign)
+            st.success(f"Added {len(selected_campaigns)} campaigns to exclusion list.")
+            st.rerun()
+    else:
+        st.info("All campaigns are already excluded.")
+
 def display_mapping_stats(ads_df: pd.DataFrame):
     """Display mapping statistics."""
     if ads_df.empty:
@@ -387,6 +486,10 @@ def display_mapping_stats(ads_df: pd.DataFrame):
     ads_df_temp['Mapped Product'] = ads_df_temp['Campaign Name'].apply(
         lambda x: map_campaign(x, st.session_state["mappings"])
     )
+    
+    # Filter out excluded campaigns from stats
+    if st.session_state["excluded_campaigns"]:
+        ads_df_temp = ads_df_temp[~ads_df_temp['Campaign Name'].isin(st.session_state["excluded_campaigns"])]
     
     total_spend = ads_df_temp['Ad Spend'].sum()
     unmapped = ads_df_temp[ads_df_temp['Mapped Product'] == 'Unmapped']
@@ -405,175 +508,235 @@ def display_mapping_stats(ads_df: pd.DataFrame):
         st.dataframe(unmapped_summary, use_container_width=True)
 
 # ----------------------------------------------------
-# SIDEBAR: UPLOAD & CONFIG
+# MAIN APPLICATION
 # ----------------------------------------------------
-st.sidebar.header("Upload & Settings")
-
-account = st.sidebar.selectbox("1. Account/Client", ["CuriousPress", "Client A", "Client B"])
-
-royalty_files = st.sidebar.file_uploader(
-    "2. Upload KDP Royalty Files (Excel with multiple sheets)",
-    type=["xlsx", "xls", "csv"],
-    accept_multiple_files=True,
-    help="Upload Excel files containing eBook, Paperback, Hardcover, and KENP sheets"
-)
-
-ads_file = st.sidebar.file_uploader(
-    "3. Upload Advertising Data (AdLabs Export)",
-    type=["xlsx", "xls", "csv"],
-    help="Upload your AdLabs campaign export file"
-)
-
-# Extract metadata
-file_to_date_map = {}
-unique_dates = set()
-all_marketplaces = set()
-
-if royalty_files:
-    for file in royalty_files:
-        date_found, marketplaces_found = get_royalty_file_metadata(file)
-        if date_found:
-            file_to_date_map[file.name] = date_found
-            unique_dates.add(date_found)
-        all_marketplaces.update(marketplaces_found)
-
-# Date selector
-selected_month = None
-if unique_dates:
-    sorted_dates = sorted(list(unique_dates), reverse=True)
-    selected_month = st.sidebar.selectbox("4. Reporting Month", sorted_dates, index=0)
-else:
-    selected_month = st.sidebar.text_input("4. Reporting Month (Manual)", value="September 2025")
-
-# Marketplace selector
-selected_marketplace = None
-if all_marketplaces:
-    marketplace_options = ["All Marketplaces"] + sorted(list(all_marketplaces))
-    selected_marketplace = st.sidebar.selectbox("5. Marketplace", marketplace_options, index=0)
-else:
-    marketplace_options = ["All Marketplaces", "Amazon.com", "Amazon.co.uk", "Amazon.ca"]
-    selected_marketplace = st.sidebar.selectbox("5. Marketplace (Manual)", marketplace_options, index=0)
-
-# ----------------------------------------------------
-# MAIN DASHBOARD
-# ----------------------------------------------------
-if royalty_files and ads_file and selected_month and selected_marketplace:
+if check_login():
+    # ----------------------------------------------------
+    # SIDEBAR: UPLOAD & CONFIG
+    # ----------------------------------------------------
+    st.sidebar.header(f"Upload & Settings - {st.session_state.current_account}")
+    logout()
     
-    royalty_df_merged, raw_royalty_combined = combine_and_merge_royalty_data(
-        royalty_files, file_to_date_map, selected_month, selected_marketplace
+    # Account management
+    with st.sidebar.expander("Account Management"):
+        if st.button("Add New Account"):
+            st.session_state.show_add_account = True
+    
+    # Add new account dialog
+    if st.session_state.get("show_add_account", False):
+        with st.sidebar.form("add_account_form"):
+            new_account = st.text_input("New Account Name")
+            new_password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Add Account")
+            
+            if submitted and new_account:
+                st.session_state.accounts[new_account] = {
+                    "password": hashlib.md5(new_password.encode()).hexdigest()
+                }
+                st.success(f"Account {new_account} added successfully!")
+                st.session_state.show_add_account = False
+                st.rerun()
+    
+    royalty_files = st.sidebar.file_uploader(
+        "2. Upload KDP Royalty Files (Excel with multiple sheets)",
+        type=["xlsx", "xls", "csv"],
+        accept_multiple_files=True,
+        help="Upload Excel files containing eBook, Paperback, Hardcover, and KENP sheets"
     )
     
-    ads_df = clean_ads_data(ads_file)
+    # NEW: Multiple advertising files with marketplace selection
+    st.sidebar.subheader("3. Upload Advertising Data")
+    ads_files = st.sidebar.file_uploader(
+        "Upload Advertising Data (AdLabs Export)",
+        type=["xlsx", "xls", "csv"],
+        accept_multiple_files=True,
+        help="Upload your AdLabs campaign export files for different marketplaces"
+    )
     
-    if not royalty_df_merged.empty and not ads_df.empty:
-        
-        metrics_df = calculate_metrics(ads_df, royalty_df_merged, st.session_state["mappings"])
-        
-        tab1, tab2, tab3 = st.tabs(["📊 Performance Summary", "📝 Campaign Mapping", "📂 Raw Data"])
-        
-        with tab1:
-            st.header(f"Performance Summary — {account} ({selected_marketplace}, {selected_month})")
-            
-            # Calculate totals
-            total_ad_spend = metrics_df["Ad Spend"].sum()
-            total_ad_sales = metrics_df["Ad Sales"].sum()
-            total_royalty = metrics_df["Total Royalty"].sum()
-            total_revenue = total_royalty
-            total_units = metrics_df["Total Units Sold"].sum()
-            
-            overall_acos = (total_ad_spend / total_ad_sales * 100) if total_ad_sales > 0 else 0
-            overall_tacos = (total_ad_spend / total_revenue * 100) if total_revenue > 0 else 0
-            
-            # Display metrics
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Total Revenue", f"${total_revenue:,.2f}")
-            with col2:
-                st.metric("Overall ACOS", f"{overall_acos:.1f}%")
-                st.metric("Overall TACOS", f"{overall_tacos:.1f}%")
-            with col3:
-                st.metric("Total Units Sold", f"{int(total_units):,}")
-                st.metric("Total Ad Spend", f"${total_ad_spend:,.2f}")
-            
-            st.markdown("---")
-            st.subheader("Product Performance")
-            
-            # Revenue breakdown chart - FIXED: Filter out Unmapped
-            revenue_by_product = metrics_df.groupby('Title')[['Total Royalty', 'Ad Sales']].sum().reset_index()
-            
-            # FIXED: Filter out Unmapped from visualization
-            revenue_by_product = revenue_by_product[revenue_by_product['Title'] != 'Unmapped']
-            
-            # Only show products with actual revenue
-            revenue_by_product = revenue_by_product[revenue_by_product['Total Royalty'] + revenue_by_product['Ad Sales'] > 0]
-            
-            fig_revenue = px.bar(
-                revenue_by_product,
-                x='Title',
-                y=['Total Royalty', 'Ad Sales'],
-                title='Total Revenue Breakdown by Product (Royalty vs. Ad Sales)',
-                labels={'value': 'Revenue ($)', 'variable': 'Revenue Type', 'Title': 'Product'},
-                height=500
-            )
-            fig_revenue.update_layout(xaxis={'categoryorder': 'total descending'})
-            st.plotly_chart(fig_revenue, use_container_width=True)
-            
-            # Performance table - FIXED: Filter out Unmapped
-            display_df = metrics_df[metrics_df['Title'] != 'Unmapped'].copy()
-            
-            display_cols = [
-                "Title", "Author", "Total Revenue", "Ad Spend", 
-                "Ad Sales", "Total Units Sold", "Campaign Count", "ACOS %", "TACOS %"
-            ]
-            st.dataframe(
-                display_df[display_cols].sort_values("Total Revenue", ascending=False),
-                use_container_width=True
-            )
-            
-            # Show unmapped warning if needed
-            unmapped_spend = metrics_df[metrics_df['Title'] == 'Unmapped']['Ad Spend'].sum()
-            if unmapped_spend > 0:
-                st.warning(f"⚠️ **${unmapped_spend:,.2f}** in Ad Spend is currently **UNMAPPED**! Use the Campaign Mapping tab to fix this.")
-        
-        with tab2:
-            st.header("Campaign Mapping & Management")
-            
-            with st.form("mapping_form"):
-                st.subheader("Add New Mapping Rule")
-                
-                product_list = sorted(royalty_df_merged['Title'].unique())
-                new_product = st.selectbox("Map To Product Title", product_list, key="map_select")
-                new_rule = st.text_input("Mapping Keyword", key="map_rule", 
-                                       help="Enter keyword that appears in campaign names")
-                
-                submitted = st.form_submit_button("Add Mapping Rule")
-                
-                if submitted:
-                    if new_rule and new_product:
-                        st.session_state["mappings"][new_rule.lower()] = new_product
-                        st.success(f"Rule added: '{new_rule}' → {new_product}")
-                        st.rerun()
-                    else:
-                        st.warning("Please enter both keyword and select a product.")
-            
-            render_mapping_management(royalty_df_merged)
-            display_mapping_stats(ads_df)
-        
-        with tab3:
-            st.header("Raw Data View")
-            
-            st.subheader("Advertising Data")
-            st.dataframe(ads_df, use_container_width=True)
-            
-            st.subheader("Processed Royalty Data")
-            st.dataframe(raw_royalty_combined, use_container_width=True)
+    # Store ads files with marketplace info
+    ads_files_with_marketplace = []
+    if ads_files:
+        for file in ads_files:
+            with st.sidebar.expander(f"Configure {file.name}"):
+                marketplace = st.selectbox(
+                    f"Marketplace for {file.name}",
+                    ["Amazon.com", "Amazon.co.uk", "Amazon.ca", "Amazon.de", "Amazon.fr", "Amazon.es", "Amazon.it", "Amazon.jp", "Amazon.au", "Other"],
+                    key=f"marketplace_{file.name}"
+                )
+                ads_files_with_marketplace.append((file, marketplace))
     
+    # Extract metadata
+    file_to_date_map = {}
+    unique_dates = set()
+    all_marketplaces = set()
+    
+    if royalty_files:
+        for file in royalty_files:
+            date_found, marketplaces_found = get_royalty_file_metadata(file)
+            if date_found:
+                file_to_date_map[file.name] = date_found
+                unique_dates.add(date_found)
+            all_marketplaces.update(marketplaces_found)
+    
+    # Date selector
+    selected_month = None
+    if unique_dates:
+        sorted_dates = sorted(list(unique_dates), reverse=True)
+        selected_month = st.sidebar.selectbox("4. Reporting Month", sorted_dates, index=0)
     else:
-        st.error("⚠️ Dashboard cannot load. Please check:")
-        if royalty_df_merged.empty:
-            st.markdown("- Royalty data processing failed")
-        if ads_df.empty:
-            st.markdown("- Advertising data loading failed")
+        selected_month = st.sidebar.text_input("4. Reporting Month (Manual)", value="September 2025")
+    
+    # Marketplace selector
+    selected_marketplace = None
+    if all_marketplaces:
+        marketplace_options = ["All Marketplaces"] + sorted(list(all_marketplaces))
+        selected_marketplace = st.sidebar.selectbox("5. Marketplace", marketplace_options, index=0)
+    else:
+        marketplace_options = ["All Marketplaces", "Amazon.com", "Amazon.co.uk", "Amazon.ca"]
+        selected_marketplace = st.sidebar.selectbox("5. Marketplace (Manual)", marketplace_options, index=0)
+    
+    # ----------------------------------------------------
+    # MAIN DASHBOARD
+    # ----------------------------------------------------
+    if royalty_files and ads_files and selected_month and selected_marketplace:
+        
+        royalty_df_merged, raw_royalty_combined = combine_and_merge_royalty_data(
+            royalty_files, file_to_date_map, selected_month, selected_marketplace
+        )
+        
+        # Process all advertising files
+        all_ads_data = []
+        for file, marketplace in ads_files_with_marketplace:
+            ads_df = clean_ads_data(file, marketplace)
+            if not ads_df.empty:
+                all_ads_data.append(ads_df)
+        
+        if all_ads_data:
+            ads_df_combined = pd.concat(all_ads_data, ignore_index=True)
+            
+            # Filter ads data by selected marketplace
+            if selected_marketplace != "All Marketplaces" and 'Marketplace' in ads_df_combined.columns:
+                ads_df_combined = ads_df_combined[ads_df_combined['Marketplace'] == selected_marketplace]
+        else:
+            ads_df_combined = pd.DataFrame()
+        
+        if not royalty_df_merged.empty and not ads_df_combined.empty:
+            
+            metrics_df = calculate_metrics(
+                ads_df_combined, 
+                royalty_df_merged, 
+                st.session_state["mappings"],
+                st.session_state["excluded_campaigns"]
+            )
+            
+            tab1, tab2, tab3 = st.tabs(["📊 Performance Summary", "📝 Campaign Mapping", "📂 Raw Data"])
+            
+            with tab1:
+                st.header(f"Performance Summary — {st.session_state.current_account} ({selected_marketplace}, {selected_month})")
+                
+                # Calculate totals
+                total_ad_spend = metrics_df["Ad Spend"].sum()
+                total_ad_sales = metrics_df["Ad Sales"].sum()
+                total_royalty = metrics_df["Total Royalty"].sum()
+                total_revenue = total_royalty
+                total_profit = metrics_df["Profit"].sum()
+                total_units = metrics_df["Total Units Sold"].sum()
+                
+                overall_acos = (total_ad_spend / total_ad_sales * 100) if total_ad_sales > 0 else 0
+                overall_tacos = (total_ad_spend / total_revenue * 100) if total_revenue > 0 else 0
+                
+                # Display metrics
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Total Revenue", f"${total_revenue:,.2f}")
+                    st.metric("Total Profit", f"${total_profit:,.2f}")
+                with col2:
+                    st.metric("Overall ACOS", f"{overall_acos:.1f}%")
+                    st.metric("Overall TACOS", f"{overall_tacos:.1f}%")
+                with col3:
+                    st.metric("Total Units Sold", f"{int(total_units):,}")
+                    st.metric("Total Ad Spend", f"${total_ad_spend:,.2f}")
+                
+                st.markdown("---")
+                st.subheader("Product Performance")
+                
+                # Revenue breakdown chart - FIXED: Filter out Unmapped
+                revenue_by_product = metrics_df.groupby('Title')[['Total Royalty', 'Ad Sales']].sum().reset_index()
+                
+                # FIXED: Filter out Unmapped from visualization
+                revenue_by_product = revenue_by_product[revenue_by_product['Title'] != 'Unmapped']
+                
+                # Only show products with actual revenue
+                revenue_by_product = revenue_by_product[revenue_by_product['Total Royalty'] + revenue_by_product['Ad Sales'] > 0]
+                
+                fig_revenue = px.bar(
+                    revenue_by_product,
+                    x='Title',
+                    y=['Total Royalty', 'Ad Sales'],
+                    title='Total Revenue Breakdown by Product (Royalty vs. Ad Sales)',
+                    labels={'value': 'Revenue ($)', 'variable': 'Revenue Type', 'Title': 'Product'},
+                    height=500
+                )
+                fig_revenue.update_layout(xaxis={'categoryorder': 'total descending'})
+                st.plotly_chart(fig_revenue, use_container_width=True)
+                
+                # Performance table - FIXED: Filter out Unmapped
+                display_df = metrics_df[metrics_df['Title'] != 'Unmapped'].copy()
+                
+                display_cols = [
+                    "Title", "Author", "Total Revenue", "Profit", "Ad Spend", 
+                    "Ad Sales", "Total Units Sold", "Campaign Count", "ACOS %", "TACOS %"
+                ]
+                st.dataframe(
+                    display_df[display_cols].sort_values("Total Revenue", ascending=False),
+                    use_container_width=True
+                )
+                
+                # Show unmapped warning if needed
+                unmapped_spend = metrics_df[metrics_df['Title'] == 'Unmapped']['Ad Spend'].sum()
+                if unmapped_spend > 0:
+                    st.warning(f"⚠️ **${unmapped_spend:,.2f}** in Ad Spend is currently **UNMAPPED**! Use the Campaign Mapping tab to fix this.")
+            
+            with tab2:
+                st.header("Campaign Mapping & Management")
+                
+                with st.form("mapping_form"):
+                    st.subheader("Add New Mapping Rule")
+                    
+                    product_list = sorted(royalty_df_merged['Title'].unique())
+                    new_product = st.selectbox("Map To Product Title", product_list, key="map_select")
+                    new_rule = st.text_input("Mapping Keyword", key="map_rule", 
+                                           help="Enter keyword that appears in campaign names")
+                    
+                    submitted = st.form_submit_button("Add Mapping Rule")
+                    
+                    if submitted:
+                        if new_rule and new_product:
+                            st.session_state["mappings"][new_rule.lower()] = new_product
+                            st.success(f"Rule added: '{new_rule}' → {new_product}")
+                            st.rerun()
+                        else:
+                            st.warning("Please enter both keyword and select a product.")
+                
+                render_mapping_management(royalty_df_merged)
+                render_excluded_campaigns(ads_df_combined)
+                display_mapping_stats(ads_df_combined)
+            
+            with tab3:
+                st.header("Raw Data View")
+                
+                st.subheader("Advertising Data")
+                st.dataframe(ads_df_combined, use_container_width=True)
+                
+                st.subheader("Processed Royalty Data")
+                st.dataframe(raw_royalty_combined, use_container_width=True)
+        
+        else:
+            st.error("⚠️ Dashboard cannot load. Please check:")
+            if royalty_df_merged.empty:
+                st.markdown("- Royalty data processing failed")
+            if ads_df_combined.empty:
+                st.markdown("- Advertising data loading failed")
 
-else:
-    st.info("👆 Please upload KDP Royalty files and Advertising data to activate the dashboard.")
+    else:
+        st.info("👆 Please upload KDP Royalty files and Advertising data to activate the dashboard.")
