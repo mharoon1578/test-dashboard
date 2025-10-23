@@ -30,18 +30,27 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Initialize session state
-if "mappings" not in st.session_state:
-    st.session_state["mappings"] = {}
-if "excluded_campaigns" not in st.session_state:
-    st.session_state["excluded_campaigns"] = []
-if "current_account" not in st.session_state:
-    st.session_state["current_account"] = None
-if "accounts" not in st.session_state:
-    st.session_state["accounts"] = {
-        "CuriousPress": {"password": hashlib.md5("curious123".encode()).hexdigest()},
-        "Client A": {"password": hashlib.md5("clienta123".encode()).hexdigest()},
-        "Client B": {"password": hashlib.md5("clientb123".encode()).hexdigest()}
+def init_session_state():
+    """Initialize all session state variables"""
+    defaults = {
+        "mappings": {},
+        "excluded_campaigns": [],
+        "current_account": None,
+        "accounts": {
+            "CuriousPress": {"password": hashlib.md5("curious123".encode()).hexdigest()},
+            "Client A": {"password": hashlib.md5("clienta123".encode()).hexdigest()},
+            "Client B": {"password": hashlib.md5("clientb123".encode()).hexdigest()}
+        },
+        "show_add_account": False,
+        "ads_files_data": {}  # Store processed ads data
     }
+    
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+# Initialize session state
+init_session_state()
 
 # ----------------------------------------------------
 # AUTHENTICATION FUNCTIONS
@@ -174,7 +183,7 @@ def process_kdp_sheet(df: pd.DataFrame, sheet_type: str) -> pd.DataFrame:
         required_cols = ['Title', 'Royalty', 'Units Sold', 'Marketplace']
         if all(col in df.columns for col in required_cols):
             processed = df[required_cols].copy()
-            processed['Author'] = 'N/A'  # Author not always in paperback sheet
+            processed['Author'] = df.get('Author', 'N/A')  # Use .get() to avoid KeyError
             processed['Format'] = 'Paperback'
             processed['Revenue'] = pd.to_numeric(processed['Royalty'], errors='coerce').fillna(0)
             processed['Units'] = pd.to_numeric(processed['Units Sold'], errors='coerce').fillna(0)
@@ -183,7 +192,7 @@ def process_kdp_sheet(df: pd.DataFrame, sheet_type: str) -> pd.DataFrame:
         required_cols = ['Title', 'Royalty', 'Units Sold', 'Marketplace']
         if all(col in df.columns for col in required_cols):
             processed = df[required_cols].copy()
-            processed['Author'] = 'N/A'
+            processed['Author'] = df.get('Author', 'N/A')
             processed['Format'] = 'Hardcover'
             processed['Revenue'] = pd.to_numeric(processed['Royalty'], errors='coerce').fillna(0)
             processed['Units'] = pd.to_numeric(processed['Units Sold'], errors='coerce').fillna(0)
@@ -192,7 +201,7 @@ def process_kdp_sheet(df: pd.DataFrame, sheet_type: str) -> pd.DataFrame:
         required_cols = ['Title', 'eBook ASIN', 'Kindle Edition Normalized Pages (KENP)', 'Marketplace']
         if all(col in df.columns for col in required_cols):
             processed = df[required_cols].copy()
-            processed['Author'] = 'N/A'
+            processed['Author'] = df.get('Author', 'N/A')
             processed['Format'] = 'KENP'
             # KENP revenue is calculated differently - for now, we'll track pages read
             processed['Revenue'] = 0  # KENP revenue is separate and complex
@@ -280,8 +289,12 @@ def combine_and_merge_royalty_data(royalty_files: List[Any], file_to_date_map: D
     
     # Group by Title and aggregate all formats
     # Get the first author for each title (prioritize eBook author if available)
-    author_map = combined_df[combined_df['Format'] == 'eBook'].drop_duplicates('Title').set_index('Title')['Author']
-    combined_df['Author'] = combined_df.apply(lambda row: author_map.get(row['Title'], row['Author']), axis=1)
+    ebook_authors = combined_df[combined_df['Format'] == 'eBook'].drop_duplicates('Title')
+    if not ebook_authors.empty:
+        author_map = ebook_authors.set_index('Title')['Author']
+        combined_df['Author'] = combined_df.apply(
+            lambda row: author_map.get(row['Title'], row['Author']), axis=1
+        )
     
     # Aggregate by Title
     merged_royalty_df = combined_df.groupby(['Title', 'Author'], as_index=False).agg({
@@ -296,7 +309,6 @@ def combine_and_merge_royalty_data(royalty_files: List[Any], file_to_date_map: D
     
     return merged_royalty_df, combined_df
 
-@st.cache_data
 def clean_ads_data(ads_file: Any, marketplace: str = None) -> pd.DataFrame:
     """Standardize Advertising data columns."""
     df = load_df(ads_file, "Ads", 0)
@@ -352,7 +364,6 @@ def map_campaign(name: str, mappings: Dict[str, str]) -> str:
                 return product
     return "Unmapped"
 
-@st.cache_data
 def calculate_metrics(ads_df: pd.DataFrame, royalties_df: pd.DataFrame, mappings: Dict[str, str], excluded_campaigns: List[str]) -> pd.DataFrame:
     """Calculate comprehensive metrics with proper unmapped handling."""
     if ads_df.empty or royalties_df.empty:
